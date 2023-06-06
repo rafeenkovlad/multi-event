@@ -23,12 +23,11 @@ class Event
     public  ?int  $pid_10; public ?string $script_pid_10;
 
     private const TOTAL = 10;
-
-    private array $events;
+    private int $maxThreads;
 
     public static function init():self
     {
-        $threads = fopen('./command/Pull/'.self::EVENT, 'r');
+        $threads = fopen('./Pull/'.self::EVENT, 'r+');
         $json = fgets($threads);
         $event = json_decode($json, false);
 
@@ -53,38 +52,41 @@ class Event
     /**
      * @throws \JsonException
      */
-    public function onJob(string $COMMAND, $descriptorspec = []):?int
+    public function onJob(string $COMMAND):array
     {
-        [Event::class, 'checkCommand']($COMMAND);
-
-        $pid = false;
+        [$this, 'checkCommand']($COMMAND);
+        $tasks = [];
         for($i = 1; $i<= self::TOTAL; $i++) {
             if(isset($this->{'pid_'.$i})){
-                continue;
+                if(!preg_match('/.*?PID.*TTY.*TIME.*CMD\s+('.$this->{'pid_'.$i}.')\s+.*/m', (string)shell_exec("ps -p ".$this->{'pid_'.$i}))) {
+                    echo '===============> Высвобожден pid_'.$i."\n";
+                    $this->unset($this->{'pid_'.$i});
+                }else{
+                    continue;
+                }
+
             }
 
-            $current = proc_open(PHP_BINARY.' ./command/'.$COMMAND, $descriptorspec, $pipes);
-            if(is_resource($current)) {
-                $status = proc_get_status($current);
-                $pid = (int)$status['pid']??0;
+            $pid = exec(PHP_BINARY.' ./'.$COMMAND. ' > /dev/null 2>&1 & echo $!; ', $output);
+            if($pid) {
+                $pid = (int) $pid;
                 $this->{'pid_'.$i} = $pid;
                 $this->{'script_pid_'.$i} = $COMMAND;
-                $threads = fopen('./command/Pull/'.Event::EVENT,'w');
+                $threads = fopen('./Pull/'.Event::EVENT,'w');
                 fwrite($threads, json_encode($this, JSON_THROW_ON_ERROR));
                 fclose($threads);
 
-                $run = proc_open(PHP_BINARY.' ./command/Pull/Run.php '.$pid.' '.$i, [], $pipes);
-                //$status = proc_get_status($run);
+                //proc_open(PHP_BINARY.' ./command/Pull/Run.php '.$pid.' '.$i, $descriptorspec, $pipes);
+                //exec(PHP_BINARY.' ./command/Pull/Run.php '.(print $pid).' '.$i);
+                $tasks[] = $pid;
+            }
+
+            if($this->maxThreads === count($tasks)) {
                 break;
             }
         }
 
-        if(!$pid) {
-            //echo '===============>!!!Нет доступных слотов, добавляем задачу в очередь. '."\n";
-            return null;
-        }
-
-        return $pid;
+        return $tasks;
     }
 
     public function unset(int $pid):void
@@ -100,25 +102,19 @@ class Event
             }
         }
 
-        $threads = fopen('./command/Pull/'.Event::EVENT,'w');
+        $threads = fopen('./Pull/'.Event::EVENT,'w');
         fwrite($threads, json_encode($this, JSON_THROW_ON_ERROR));
         fclose($threads);
     }
 
     private function checkCommand(string $command)
     {
-        if(!in_array($command, [self::EVENT_EXPORT])) {
+        if($command === self::EVENT_EXPORT) {
+            $this->maxThreads = 10;
+        }else {
             throw new \RuntimeException('Неопределенная команда!');
         }
-    }
 
-    public function getStatus():array
-    {
-        $values = [];
-        foreach ($this as $name => $propertie) {
-            $values[$name] = $propertie;
-        }
-        return $values;
     }
 
     public function checkFreePid():bool
@@ -127,11 +123,15 @@ class Event
             if(!isset($this->{'pid_'.$i})){
                 return true;
             }
+            if(!preg_match('/.*?PID.*TTY.*TIME.*CMD\s+('.$this->{'pid_'.$i}.')\s+.*/m', (string)shell_exec("ps -p ".$this->{'pid_'.$i}))) {
+                $this->unset($this->{'pid_'.$i});
+                return true;
+            }
         }
 
         return false;
     }
 }
 
-//$Event = Event::init();
-//$Event->onJob(Event::EVENT_EXPORT);
+$Event = Event::init();
+$Event->onJob($_SERVER['argv'][1]);
